@@ -1,4 +1,5 @@
 import json
+from collections.abc import Mapping
 
 from ollama import chat
 
@@ -51,6 +52,11 @@ CRITICAL RULES:
     mean directing.job = 'Assistant Director' with directing.order = 2.
 14. A character name is never a Person. For "movies where Person played Character", bind the
     Person's ACTED_IN relationship and filter acting.character with case-insensitive CONTAINS.
+15. When the question asks for a movie's director, bind DIRECTED and require
+    toLower(directing.job) = toLower('Director') so assistant and unit directors are excluded.
+16. Never match a movie title with a direct property map such as (m:Movie {{title: 'value'}}).
+    Use a case-insensitive WHERE clause. If the user's title may be partial or approximate, use
+    toLower(m.title) CONTAINS toLower('UserTitle') and return m.title to identify the match.
 
 Response Format:
 {{
@@ -93,6 +99,7 @@ Generate the Cypher query now:"""
             
             # Post-process: Ensure Person name filters use case-insensitive matching
             cypher = self._ensure_case_insensitive_matching(cypher)
+            cypher = self._ensure_case_insensitive_movie_titles(cypher)
             cypher = self._ensure_case_insensitive_contains(cypher)
             cypher = self._remove_duplicate_where_clauses(cypher)
             
@@ -155,6 +162,26 @@ Generate the Cypher query now:"""
         cypher = re.sub(pattern2, replace_func2, cypher)
         return cypher
 
+    def _ensure_case_insensitive_movie_titles(self, cypher):
+        """Convert direct Movie title maps to case-insensitive predicates."""
+        import re
+
+        pattern = (
+            r"\((\w+):Movie\s*\{\s*title:\s*"
+            r"([\"'])([^\"']+)\2\s*\}\)"
+        )
+
+        return re.sub(
+            pattern,
+            lambda match: (
+                f"({match.group(1)}:Movie) WHERE "
+                f"toLower({match.group(1)}.title) = "
+                f"toLower({match.group(2)}{match.group(3)}{match.group(2)})"
+            ),
+            cypher,
+            flags=re.IGNORECASE,
+        )
+
     def _ensure_case_insensitive_contains(self, cypher):
         """
         Normalize string literals compared to toLower(...) with CONTAINS.
@@ -189,6 +216,45 @@ Generate the Cypher query now:"""
             if updated == cypher:
                 return cypher
             cypher = updated
+
+    def _resolve_approximate_movie_title(self, cypher):
+        """Replace a missing exact title with the closest title stored in Neo4j."""
+        import re
+
+        pattern = re.compile(
+            r"toLower\((?P<variable>\w+)\.title\)\s*=\s*"
+            r"toLower\((?P<quote>[\"'])(?P<title>[^\"']+)(?P=quote)\)",
+            flags=re.IGNORECASE,
+        )
+        match = pattern.search(cypher)
+        if not match:
+            return None
+
+        requested_title = match.group("title")
+        escaped_title = requested_title.replace("\\", "\\\\").replace("'", "\\'")
+        candidates = self.db.query(
+            "MATCH (movie:Movie) "
+            f"WHERE toLower(movie.title) CONTAINS toLower('{escaped_title}') "
+            "RETURN movie.title AS title "
+            f"ORDER BY abs(size(movie.title) - size('{escaped_title}')), movie.title "
+            "LIMIT 1"
+        )
+        if not candidates:
+            return None
+
+        resolved_title = candidates[0]["title"]
+        if resolved_title.casefold() == requested_title.casefold():
+            return None
+
+        quote = match.group("quote")
+        escaped_resolved_title = resolved_title.replace("\\", "\\\\").replace(
+            quote, f"\\{quote}"
+        )
+        replacement = (
+            f"toLower({match.group('variable')}.title) = "
+            f"toLower({quote}{escaped_resolved_title}{quote})"
+        )
+        return pattern.sub(replacement, cypher, count=1)
 
     def validate_cypher(
         self,
@@ -226,43 +292,88 @@ Generate the Cypher query now:"""
         facts = []
 
         for row in rows:
-            # Extract values from row dictionary
-            values = list(row.values())
-            if values:
-                facts.append(str(values[0]))
+            formatted_row = {
+                key: self._context_value(value)
+                for key, value in row.items()
+            }
+            facts.append(
+                json.dumps(
+                    formatted_row,
+                    ensure_ascii=False,
+                    default=str,
+                )
+            )
 
         return "\n".join(facts)
+
+    def _context_value(self, value):
+        if isinstance(value, Mapping):
+            properties = {
+                key: self._context_value(item)
+                for key, item in value.items()
+            }
+            labels = getattr(value, "labels", None)
+            if labels is not None:
+                return {
+                    "labels": sorted(labels),
+                    "properties": properties,
+                }
+            return properties
+        if isinstance(value, (list, tuple, set, frozenset)):
+            return [
+                self._context_value(item)
+                for item in value
+            ]
+        return value
+
+    def _required_answer_values(self, value):
+        if isinstance(value, Mapping):
+            for property_name in ("name", "title"):
+                property_value = value.get(property_name)
+                if property_value is not None:
+                    return [str(property_value)]
+            return []
+        if isinstance(value, (list, tuple, set, frozenset)):
+            return [
+                required
+                for item in value
+                for required in self._required_answer_values(item)
+            ]
+        if value is None:
+            return []
+        return [str(value)]
 
     def answer(
         self,
         question,
-        context
+        rows
     ):
 
-        # Count results
-        if context == "No results found.":
-            result_count = 0
-            display_context = context
-        else:
-            lines = context.split("\n")
-            result_count = len(lines)
-            # Limit to top 20 results for the LLM
-            if result_count > 20:
-                display_context = "\n".join(lines[:20]) + f"\n... and {result_count - 20} more results"
-            else:
-                display_context = context
-
-        if result_count == 0:
+        if not rows:
             return "No results found."
+
+        result_count = len(rows)
+        displayed_rows = rows[:20]
+        display_context = self.build_context(displayed_rows)
+        if result_count > 20:
+            display_context += f"\n... and {result_count - 20} more results"
 
         prompt = f"""
 Answer the question using only the query results below.
 
 The query results are authoritative database facts:
-- Include the returned values exactly as provided.
-- Include every displayed result; never select only one result unless only one was returned.
+- For scalar or tabular results, include every displayed row and every returned column.
+- Preserve the association between all fields on the same result row.
 - Do not contradict, correct, reinterpret, or supplement them.
 - Do not use outside knowledge.
+- When a node or property map is returned, never expose driver representations, element IDs,
+  labels, braces, or raw dictionaries. Render a polished profile with a heading and clearly
+  labeled paragraphs or bullet points.
+- For a person profile, prioritize name, biography, birthday, deathday, place of birth, gender,
+  known-for department, aliases, homepage, and IMDb ID. Omit internal IDs, MongoDB fields,
+  image paths, and external-link IDs unless the user explicitly requests them.
+- A biography may be concisely summarized, but every statement must remain grounded in the
+  returned biography and properties.
 - If the results contain only a movie title, state that title as the answer without discussing
   actors, characters, or other facts that are not present in the results.
 
@@ -285,7 +396,12 @@ Answer:"""
         )
 
         answer = response.message.content.strip()
-        displayed_values = lines[:20]
+        displayed_values = [
+            required
+            for row in displayed_rows
+            for value in row.values()
+            for required in self._required_answer_values(value)
+        ]
 
         if any(value not in answer for value in displayed_values):
             return display_context
@@ -316,14 +432,18 @@ Answer:"""
         rows = self.db.query(
             cypher
         )
-
-        context = self.build_context(
-            rows
-        )
+        if not rows:
+            resolved_cypher = self._resolve_approximate_movie_title(cypher)
+            if resolved_cypher:
+                self.validate_cypher(resolved_cypher)
+                resolved_rows = self.db.query(resolved_cypher)
+                if resolved_rows:
+                    cypher = resolved_cypher
+                    rows = resolved_rows
 
         answer = self.answer(
             question,
-            context
+            rows
         )
 
         return {

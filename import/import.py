@@ -112,16 +112,54 @@ def parse_datetime(value: Any) -> datetime | None:
 
 def person_properties(record: dict[str, Any]) -> dict[str, Any]:
 	gender = normalize_scalar(record.get("gender"))
-	return clean_properties(
+	also_known_as = record.get("also_known_as")
+	if also_known_as is not None and not isinstance(also_known_as, list):
+		raise ValueError(f"Invalid person also_known_as value: {also_known_as!r}")
+	mongo_id = record.get("_id")
+	if mongo_id is not None:
+		if not isinstance(mongo_id, dict) or not isinstance(mongo_id.get("$oid"), str):
+			raise ValueError(f"Invalid person _id value: {mongo_id!r}")
+		mongo_id = mongo_id["$oid"]
+
+	external_links = record.get("external_links")
+	if external_links is None:
+		external_links = {}
+	if not isinstance(external_links, dict):
+		raise ValueError(f"Invalid person external_links value: {external_links!r}")
+
+	properties = clean_properties(
 		{
 			"id": record.get("id"),
+			"mongo_id": mongo_id,
 			"adult": record.get("adult"),
+			"also_known_as": [
+				normalize_scalar(name)
+				for name in also_known_as
+				if name is not None
+			] if also_known_as is not None else None,
+			"biography": record.get("biography"),
+			"birthday": record.get("birthday"),
+			"deathday": record.get("deathday"),
 			"gender": GENDERS.get(gender, str(gender) if gender is not None else None),
+			"homepage": record.get("homepage"),
+			"imdb_id": record.get("imdb_id"),
 			"known_for_department": record.get("known_for_department"),
 			"name": record.get("name"),
 			"original_name": record.get("original_name", record.get("name")),
+			"place_of_birth": record.get("place_of_birth"),
+			"popularity": record.get("popularity"),
+			"profile_path": record.get("profile_path"),
 		}
 	)
+	properties.update(
+		clean_properties(
+			{
+				f"external_links_{name}": value
+				for name, value in external_links.items()
+			}
+		)
+	)
+	return properties
 
 
 def movie_row(record: dict[str, Any]) -> dict[str, Any]:

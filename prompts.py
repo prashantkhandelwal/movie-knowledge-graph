@@ -14,14 +14,23 @@ NODES:
   }
 - Language: {code: string, name: string}
 - Person: {
-    id: integer, adult: boolean, gender: string, known_for_department: string,
-    name: string, original_name: string
+    id: integer, mongo_id: string, adult: boolean, also_known_as: list of strings,
+    biography: string, birthday: string, deathday: string, gender: string, homepage: string,
+    imdb_id: string, known_for_department: string, name: string, original_name: string,
+    place_of_birth: string, popularity: integer or float, profile_path: string,
+    external_links_id: integer, external_links_freebase_mid: string,
+    external_links_freebase_id: string, external_links_imdb_id: string,
+    external_links_tvrage_id: integer, external_links_facebook_id: string,
+    external_links_instagram_id: string, external_links_twitter_id: string,
+    external_links_wikidata_id: string
   }
 
 OPTIONAL NODE PROPERTIES:
 - Movie.imdbid, Movie.releasedate, Movie.voteaverage, and Movie.votecount may be absent
 - Company.country_code and Company.country_name may be absent
-- Person.known_for_department may be absent
+- Person.birthday, Person.deathday, Person.homepage, Person.imdb_id,
+  Person.known_for_department, Person.place_of_birth, Person.profile_path, and any
+  Person.external_links_* property may be absent
 
 RELATIONSHIPS:
 Movie Relationships:
@@ -100,6 +109,10 @@ IMPORTANT RULES:
 - Match person names and movie titles case-insensitively:
   WHERE toLower(p.name) = toLower('PersonName')
   WHERE toLower(m.title) = toLower('MovieTitle')
+- Never put a movie title in a direct property map such as (m:Movie {title: 'MovieTitle'}).
+  When the user provides a partial, misspelled, singularized, or otherwise approximate title,
+  use toLower(m.title) CONTAINS toLower('UserTitle') and return m.title so the matched movie is
+  visible. Do not silently invent punctuation or an exact title that the user did not provide.
 - Do not use `*` inside a string as a wildcard. Use CONTAINS, STARTS WITH, or ENDS WITH.
 - Use the exact property names from the schema. In particular, use `m.isadult`, `m.imdbid`,
   `m.originallanguage`, `m.originaltitle`, `m.releasedate`, `m.voteaverage`, and `m.votecount`.
@@ -119,6 +132,8 @@ IMPORTANT RULES:
   not a separate node.
 - Distinguish lookup direction from result direction. "Movies by PersonName" filters Person and
   returns Movie; "who worked on MovieTitle" filters Movie and returns Person.
+- For a general request about a person, match Person.name case-insensitively and return the Person
+  node so its available profile properties can be presented.
 - For multiple independent movie criteria, use separate or comma-separated MATCH patterns joined
   through the same Movie variable. Do not invent shortcut relationships.
 - Return DISTINCT entities or scalar values when multiple credits could produce duplicates.
@@ -126,11 +141,14 @@ IMPORTANT RULES:
   specifying a count, return 5 results.
 
 EXAMPLE QUERIES:
+- Person profile: MATCH (p:Person) WHERE toLower(p.name) = toLower('PersonName') RETURN p
+- Cast of a movie with an approximate title: MATCH (p:Person)-[acting:ACTED_IN]->(m:Movie) WHERE toLower(m.title) CONTAINS toLower('PartialMovieTitle') RETURN DISTINCT m.title, p.name AS actor, acting.character AS character
 - Movies directed by someone: MATCH (p:Person) WHERE toLower(p.name) = toLower('DirectorName') MATCH (p)-[:DIRECTED]->(m:Movie) RETURN DISTINCT m.title
 - Director of a movie: MATCH (p:Person)-[directing:DIRECTED]->(m:Movie) WHERE toLower(m.title) = toLower('MovieTitle') AND toLower(directing.job) = toLower('Director') RETURN DISTINCT p.name
 - Second assistant directors of a movie: MATCH (p:Person)-[directing:DIRECTED]->(m:Movie) WHERE toLower(m.title) = toLower('MovieTitle') AND toLower(directing.job) = toLower('Second Assistant Director') RETURN DISTINCT p.name
 - "Who directed the movie Independence Day?": MATCH (p:Person)-[directing:DIRECTED]->(m:Movie) WHERE toLower(m.title) = toLower('Independence Day') AND toLower(directing.job) = toLower('Director') RETURN DISTINCT p.name
 - Movies with an actor: MATCH (p:Person) WHERE toLower(p.name) = toLower('ActorName') MATCH (p)-[:ACTED_IN]->(m:Movie) RETURN DISTINCT m.title
+- Movies with an actor and their directors: MATCH (p:Person)-[:ACTED_IN]->(m:Movie)<-[directing:DIRECTED]-(d:Person) WHERE toLower(p.name) = toLower('ActorName') AND toLower(directing.job) = toLower('Director') RETURN DISTINCT m.title, d.name
 - Movies with a character: MATCH (:Person)-[acting:ACTED_IN]->(m:Movie) WHERE toLower(acting.character) CONTAINS toLower('CharacterName') RETURN DISTINCT m.title
 - Movies where an actor plays a character: MATCH (p:Person)-[acting:ACTED_IN]->(m:Movie) WHERE toLower(p.name) = toLower('ActorName') AND toLower(acting.character) CONTAINS toLower('CharacterName') RETURN DISTINCT m.title
 - "In which movie Scarlett Johansson has played the character of Black Widow?": MATCH (p:Person)-[acting:ACTED_IN]->(m:Movie) WHERE toLower(p.name) = toLower('Scarlett Johansson') AND toLower(acting.character) CONTAINS toLower('Black Widow') RETURN DISTINCT m.title
