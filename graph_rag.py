@@ -14,6 +14,9 @@ class GraphRAG:
         self,
         question
     ):
+        unsupported_reason = self._unsupported_question_reason(question)
+        if unsupported_reason:
+            return f"UNSUPPORTED: {unsupported_reason}"
 
         prompt = f"""
 You are a Neo4j Cypher expert. Generate only valid Cypher queries.
@@ -34,9 +37,20 @@ CRITICAL RULES:
 7. When the question asks for movies, movies list, movie names, titles, or similar:
    - Use RETURN DISTINCT m.title to extract just the title field
    - When asking for details, use RETURN m to get all movie properties
-8. Use property filters directly: Genre {{name: 'value'}} for genres and languages
+8. Use exact property maps only for Genre and Language values. Match person names and movie
+   titles case-insensitively in WHERE clauses.
 9. IF A RELATIONSHIP OR NODE DOESN'T EXIST IN SCHEMA, RESPOND WITH:
    {{"cypher": "UNSUPPORTED: <specific reason why this query cannot be supported>"}}
+10. Use at most one WHERE clause after each MATCH or WITH. Join multiple predicates with AND.
+11. Character family relationships such as spouse, parent, sibling, or child are not stored.
+    Never infer them from co-appearance or outside knowledge; respond with UNSUPPORTED.
+12. The `order` property exists only on ACTED_IN and means cast order. Never use `order` on a
+    crew relationship.
+13. Ordinal words in crew occupations are part of the exact `job` value. For example,
+    "second assistant director" means directing.job = 'Second Assistant Director'; it does not
+    mean directing.job = 'Assistant Director' with directing.order = 2.
+14. A character name is never a Person. For "movies where Person played Character", bind the
+    Person's ACTED_IN relationship and filter acting.character with case-insensitive CONTAINS.
 
 Response Format:
 {{
@@ -55,7 +69,9 @@ Generate the Cypher query now:"""
                     "role": "user",
                     "content": prompt
                 }
-            ]
+            ],
+            format="json",
+            options={"temperature": 0}
         )
 
         content = response.message.content
@@ -77,10 +93,36 @@ Generate the Cypher query now:"""
             
             # Post-process: Ensure Person name filters use case-insensitive matching
             cypher = self._ensure_case_insensitive_matching(cypher)
+            cypher = self._ensure_case_insensitive_contains(cypher)
+            cypher = self._remove_duplicate_where_clauses(cypher)
             
             return cypher
         except json.JSONDecodeError:
             return f"UNSUPPORTED: Unable to parse response: {content[:100]}"
+
+    def _unsupported_question_reason(self, question):
+        """Identify questions that require relationships absent from the graph."""
+        import re
+
+        family_relationship = (
+            r"wife|husband|spouse|mother|father|parent|son|daughter|child|"
+            r"brother|sister|sibling"
+        )
+        asks_for_relationship = any(
+            re.search(pattern, question, flags=re.IGNORECASE)
+            for pattern in (
+                rf"\bwhat\s+(?:is|was)\s+the\s+name\s+of\s+the\s+"
+                rf"(?:{family_relationship})\s+of\b",
+                rf"\bwho\s+(?:is|was)\s+the\s+(?:{family_relationship})\s+of\b",
+                rf"\bwho\s+(?:is|was)\s+.+(?:'s|’s)\s+"
+                rf"(?:{family_relationship})\b",
+            )
+        )
+        if asks_for_relationship:
+            return (
+                "character family relationships are not stored in the database"
+            )
+        return None
 
     def _ensure_case_insensitive_matching(self, cypher):
         """
@@ -112,6 +154,41 @@ Generate the Cypher query now:"""
         
         cypher = re.sub(pattern2, replace_func2, cypher)
         return cypher
+
+    def _ensure_case_insensitive_contains(self, cypher):
+        """
+        Normalize string literals compared to toLower(...) with CONTAINS.
+        """
+        import re
+
+        pattern = r"(toLower\([^)]+\)\s+CONTAINS\s+)(?!toLower\()([\"'])([^\"']+)\2"
+
+        return re.sub(
+            pattern,
+            lambda match: f"{match.group(1)}toLower({match.group(2)}{match.group(3)}{match.group(2)})",
+            cypher,
+            flags=re.IGNORECASE
+        )
+
+    def _remove_duplicate_where_clauses(self, cypher):
+        """Remove an identical WHERE clause repeated before the next clause."""
+        import re
+
+        next_clause = (
+            r"(?:OPTIONAL\s+MATCH|MATCH|WITH|RETURN|ORDER\s+BY|LIMIT|SKIP|"
+            r"UNION|UNWIND|CALL|$)"
+        )
+        pattern = re.compile(
+            rf"\bWHERE\s+(?P<condition>.+?)\s+WHERE\s+(?P=condition)"
+            rf"(?=\s+{next_clause})",
+            flags=re.IGNORECASE,
+        )
+
+        while True:
+            updated = pattern.sub(r"WHERE \g<condition>", cypher)
+            if updated == cypher:
+                return cypher
+            cypher = updated
 
     def validate_cypher(
         self,
@@ -179,7 +256,15 @@ Generate the Cypher query now:"""
             return "No results found."
 
         prompt = f"""
-Based on the query results, answer the question clearly and concisely.
+Answer the question using only the query results below.
+
+The query results are authoritative database facts:
+- Include the returned values exactly as provided.
+- Include every displayed result; never select only one result unless only one was returned.
+- Do not contradict, correct, reinterpret, or supplement them.
+- Do not use outside knowledge.
+- If the results contain only a movie title, state that title as the answer without discussing
+  actors, characters, or other facts that are not present in the results.
 
 Question: {question}
 
@@ -195,10 +280,17 @@ Answer:"""
                     "role": "user",
                     "content": prompt
                 }
-            ]
+            ],
+            options={"temperature": 0}
         )
 
-        return response.message.content
+        answer = response.message.content.strip()
+        displayed_values = lines[:20]
+
+        if any(value not in answer for value in displayed_values):
+            return display_context
+
+        return answer
 
     def ask(
         self,
