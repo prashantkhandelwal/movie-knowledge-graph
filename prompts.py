@@ -6,7 +6,8 @@ NODES:
     id: integer, title: string, isadult: boolean, budget: integer, imdbid: string,
     revenue: integer, runtime: integer, status: string, originallanguage: string,
     originaltitle: string, releasedate: zoned datetime, video: boolean,
-    voteaverage: integer or float, votecount: integer
+    voteaverage: integer or float, votecount: integer, backdrop_path: string,
+    poster_path: string
   }
 - Genre: {id: integer, name: string}
 - Company: {
@@ -26,7 +27,8 @@ NODES:
   }
 
 OPTIONAL NODE PROPERTIES:
-- Movie.imdbid, Movie.releasedate, Movie.voteaverage, and Movie.votecount may be absent
+- Movie.imdbid, Movie.releasedate, Movie.voteaverage, Movie.votecount, Movie.backdrop_path,
+  and Movie.poster_path may be absent
 - Company.country_code and Company.country_name may be absent
 - Person.birthday, Person.deathday, Person.homepage, Person.imdb_id,
   Person.known_for_department, Person.place_of_birth, Person.profile_path, and any
@@ -116,9 +118,11 @@ IMPORTANT RULES:
 - Do not use `*` inside a string as a wildcard. Use CONTAINS, STARTS WITH, or ENDS WITH.
 - Use the exact property names from the schema. In particular, use `m.isadult`, `m.imdbid`,
   `m.originallanguage`, `m.originaltitle`, `m.releasedate`, `m.voteaverage`, and `m.votecount`.
-- Movie.imdbid, Movie.releasedate, Movie.voteaverage, Movie.votecount,
-  Person.known_for_department, Company.country_code, and Company.country_name are optional.
-  Queries must tolerate these properties being null or absent.
+- Movie.backdrop_path stores the movie poster URL, despite the property name. Treat it as the
+  movie poster, not as a backdrop image.
+- Movie.imdbid, Movie.releasedate, Movie.voteaverage, Movie.votecount, Movie.backdrop_path,
+  Movie.poster_path, Person.known_for_department, Company.country_code, and
+  Company.country_name are optional. Queries must tolerate these properties being null or absent.
 - Movie.releasedate is a zoned datetime. Compare it with datetime({...}); for example,
   "released after YEAR" means m.releasedate >= datetime({year: YEAR + 1}).
 - Movie.voteaverage can be an integer or float. Treat it as a numeric property in comparisons.

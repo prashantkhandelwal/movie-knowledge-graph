@@ -57,6 +57,8 @@ CRITICAL RULES:
 16. Never match a movie title with a direct property map such as (m:Movie {{title: 'value'}}).
     Use a case-insensitive WHERE clause. If the user's title may be partial or approximate, use
     toLower(m.title) CONTAINS toLower('UserTitle') and return m.title to identify the match.
+17. ALWAYS include a RETURN clause. If you use ORDER BY, LIMIT, or SKIP, place the RETURN
+    clause BEFORE these keywords, not after. Example: RETURN m ORDER BY m.title LIMIT 10
 
 Response Format:
 {{
@@ -102,6 +104,7 @@ Generate the Cypher query now:"""
             cypher = self._ensure_case_insensitive_movie_titles(cypher)
             cypher = self._ensure_case_insensitive_contains(cypher)
             cypher = self._remove_duplicate_where_clauses(cypher)
+            cypher = self._fix_missing_return_clause(cypher)
             
             return cypher
         except json.JSONDecodeError:
@@ -217,6 +220,31 @@ Generate the Cypher query now:"""
                 return cypher
             cypher = updated
 
+    def _fix_missing_return_clause(self, cypher):
+        """Fix queries that have ORDER BY, LIMIT, or SKIP but no RETURN clause."""
+        import re
+
+        # Check if query has ORDER BY, LIMIT, or SKIP but no RETURN
+        has_order_limit = re.search(r'\b(ORDER\s+BY|LIMIT|SKIP)\b', cypher, re.IGNORECASE)
+        has_return = re.search(r'\bRETURN\b', cypher, re.IGNORECASE)
+
+        if has_order_limit and not has_return:
+            # Find the main pattern node(s) to return
+            # Try to identify the primary variable from MATCH clause
+            match_vars = re.findall(r'\((\w+):[A-Z]\w*\)', cypher)
+            if match_vars:
+                primary_var = match_vars[0]
+                # Insert RETURN before ORDER BY/LIMIT/SKIP
+                cypher = re.sub(
+                    r'(\s)(ORDER\s+BY|LIMIT|SKIP)\b',
+                    rf' RETURN {primary_var} \1\2',
+                    cypher,
+                    count=1,
+                    flags=re.IGNORECASE
+                )
+
+        return cypher
+
     def _resolve_approximate_movie_title(self, cypher):
         """Replace a missing exact title with the closest title stored in Neo4j."""
         import re
@@ -260,6 +288,7 @@ Generate the Cypher query now:"""
         self,
         cypher
     ):
+        import re
 
         banned = [
             "CREATE",
@@ -273,10 +302,10 @@ Generate the Cypher query now:"""
         upper = cypher.upper()
 
         for keyword in banned:
-
-            if keyword in upper:
+            # Use word boundary to avoid matching substrings like "DROP" in "BACKDROP"
+            if re.search(rf'\b{keyword}\b', upper):
                 raise Exception(
-                    f"Blocked query: {keyword}"
+                    f"Blocked query: {keyword}\n\nGenerated Cypher:\n{cypher}"
                 )
 
         return True
@@ -372,6 +401,8 @@ The query results are authoritative database facts:
 - For a person profile, prioritize name, biography, birthday, deathday, place of birth, gender,
   known-for department, aliases, homepage, and IMDb ID. Omit internal IDs, MongoDB fields,
   image paths, and external-link IDs unless the user explicitly requests them.
+- For a movie profile, interpret `backdrop_path` as the movie poster URL, despite the property
+  name. Label it as the poster, never as a backdrop image.
 - A biography may be concisely summarized, but every statement must remain grounded in the
   returned biography and properties.
 - If the results contain only a movie title, state that title as the answer without discussing

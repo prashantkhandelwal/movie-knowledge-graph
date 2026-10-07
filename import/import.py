@@ -206,6 +206,8 @@ def movie_row(record: dict[str, Any]) -> dict[str, Any]:
 				"video": record.get("video"),
 				"voteaverage": record.get("vote_average"),
 				"votecount": record.get("vote_count"),
+				"backdrop_path": record.get("backdrop_path"),
+				"poster_path": record.get("poster_path"),
 			}
 		),
 		"genres": [
